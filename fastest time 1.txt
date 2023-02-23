@@ -1,0 +1,212 @@
+#!/usr/bin/env python
+import rospy
+import math
+from std_msgs.msg import String
+from legorider_organizer_lib.legorider_organizer import RobotControl
+from legorider_organizer_lib.legorider_organizer import Vector3D
+
+robot = RobotControl()
+
+# determine the correct rotation direction from current angle to target angle
+def get_delta_angle(current_angle, target_angle):
+    delta_angle = target_angle - current_angle
+    if delta_angle < -math.pi:
+        delta_angle += 2.0 * math.pi
+    if delta_angle > math.pi:
+        delta_angle -= 2.0 * math.pi
+    return delta_angle
+
+# this helper function will find the pixel index which has the brightest red component
+# this can be used to identify red boxes on the camera
+def find_max_red():
+    data = robot.camera_pixel_array()
+
+    left = -1
+    for i in range(len(data)/3):
+        ind = i*3
+        if data[ind] == 255:
+            left = i
+    
+    right = -1
+    for i in range(len(data)/3-1,-1,-1):
+        ind = i*3
+        if data[ind] == 255:
+            right = i
+
+    return left + (right-left)/2
+
+# this function will return the size of the box on the screen, can be used to get an approximation of the distance from the forklift to the box
+def redSum():
+    data = robot.camera_pixel_array()
+    if sum(data) > 19000:
+        return 0
+    reds = []
+    for i in range(len(data)/3):
+        reds.append(data[i*3])
+    return sum(reds)
+    
+# this function is pretty self-explanatory, it lets the robot turn towards a specific angle in the world (facing to the right is 0 degrees in the original challenge, that may change in the new season(s))
+def rotate_to_angle(target):
+    funkyformatted = target - 360
+    rads = math.radians(funkyformatted)
+    delta = get_delta_angle(robot.angle, rads)
+    while abs(delta) >= 0.02:
+        delta = get_delta_angle(robot.angle, rads)
+        robot.rotate(delta * 10)
+        robot.sleep(0.1)
+    robot.rotate(0)
+
+
+def start():
+    robot.move(20.0)
+    if robot.left < 0.15:
+        robot.move(0.0)
+def to_box():
+    robot.rotate(4*0.5)
+    if robot.front_left < 0.2:
+        robot.sleep(0.05)
+        robot.rotate(0.0)
+def pickup():
+    robot.move(5.0)
+    if robot.front_left < 0.02:
+        robot.move(0.0)
+        robot.sleep(0.30)
+        robot.gripper_close()
+        robot.sleep(0.4)
+        robot.lift_up()
+        robot.sleep(0.30)
+def box_drop():
+    robot.move(20.0)
+    if robot.front_left < 0.02:
+        robot.gripper_open()
+        robot.move(0.0)
+        robot.sleep(0.015)
+def reverse():
+    robot.move(-20.0)
+    robot.sleep(1.55)
+    robot.move(0.0)
+    robot.lift_down()
+def to_road(error):
+    gain = 32.0
+    command = error * gain
+    robot.rotate(command)
+    if abs(error) < 0.01:
+        robot.rotate(0.0)
+
+
+# example of making a Vector3D with x,y,z components
+# you can add and subtract Vector3D objects
+# you can call length() on them to get the magnitude
+# robot.position is a Vector3D which gives the current position of the robot
+test_vector = Vector3D(1, 0, 1)
+
+# start the robot in the "init" state
+state = "init"
+print state
+i = 0
+x = 0
+
+
+while robot.is_ok():
+        # in the init state we move forward until left sensor picks up a wall
+        # then we stop and switch to the rotate_to_box state
+    if state == "init":
+        robot.move(20.0)
+        if robot.left < 0.175:
+            robot.move(0.0)
+            state = "rotate_to_box"
+            i = i + 1
+
+        # in the rotate_to_box state we turn left until we detect the box is in front of us using the front sensor
+        # then we stop turning and switch to the go_and_grab state
+    if state == "rotate_to_box":
+        robot.rotate(16*0.5)
+        if robot.front_left < 0.2:
+            robot.sleep(0.015) # turn just a bit more so box will be lined up
+            robot.rotate(0.0)
+            state = "go_and_grab"
+            i = i + 1
+
+        # in the go_and_grab state we move forward slowly until our front sensor says the box is very close
+        # then we stop and close the gripper
+        # we wait 1 second for the gripper to close
+        # then we lift the box up
+        # we wait 1 second for the lift up to complete
+        # then we switch to the drop_box state
+    if state == "go_and_grab":
+        robot.move(5.0)
+        if robot.front_left < 0.025 or robot.front_right < 0.025:
+            robot.move(0.0)
+            robot.sleep(0.2)
+            robot.gripper_close()
+            robot.sleep(0.4)
+            robot.lift_up()
+            robot.sleep(0.3)
+            state = "drop_box"
+            i = i + 1
+
+        # in the drop_box state we drive forward slowly until we detect the wall is directly in front of us
+        # then we stop moving and open the gripper to drop the box into the bay
+        # then we switch to the back_to_the_road state
+    if state == "drop_box":
+        robot.move(20.0)
+        if robot.front_left < 0.02:
+            robot.move(0.0)
+            robot.gripper_open()
+            robot.sleep(0.025)
+            state = "back_to_the_road"
+            i = i + 1
+
+        # in the back_to_the_road state we drive backwards out of the bay
+        # when our y position is less than 0 we are back in the lane
+        # we stop moving
+        # we lower the lift to get ready for the next box
+        # then we switch to the rotate_to_the_road state
+    if state == "back_to_the_road":
+        robot.move(-20.0)
+        robot.sleep(1.5)
+        robot.move(0.0)
+        robot.lift_down()
+        robot.sleep(0.01)
+        state = "rotate_to_the_road"
+        i = i + 1
+
+        # in the rotate_to_the_road state we turn to face to the right towards the next boxes
+        # we use get_delta_angle to have the proper turning angle and rotate
+        # when we are facing to the right we stop turning
+        # then we switch to the test state
+    if state == "rotate_to_the_road":
+        if i == 17:
+            set_angle = -math.pi/2 # points to the right towards the next boxes
+            error = get_delta_angle(robot.angle, set_angle)
+            to_road(error)
+            if abs(error) < 0.01:
+                i = i + 1
+                robot.sleep(0.01)
+                robot.move(20.0)
+                robot.sleep(1.35)
+                robot.move(0.0)
+                robot.sleep(0.01)
+                state = "rotate_to_box"
+                x = 1
+        if x == 1:
+            set_angle = math.pi # points to the right towards the next boxes
+            error = get_delta_angle(robot.angle, set_angle)
+            to_road(error)
+            if abs(error) < 0.01:
+                robot.sleep(0.01)
+                if i >= 30:
+                    pass
+                    state = ""
+                    i = i + 1
+                else: 
+                    state = "init"
+                    i = i + 1
+        elif i < 17 and x == 0:
+            set_angle = 2*math.pi # points to the right towards the next boxes
+            error = get_delta_angle(robot.angle, set_angle)
+            to_road(error)
+            if abs(error) < 0.01:
+                robot.sleep(0.01)
+                state = "init"
+                i = i + 1
